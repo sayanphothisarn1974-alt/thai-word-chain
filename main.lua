@@ -60948,10 +60948,12 @@ local function detectMinimum(text)
     local n = tonumber(text:match("ยาว%s*(%d+)%s*ตัว"))
     return n and math.max(1, math.min(n, 32)) or 1
 end
+-- Reported to fail repeatedly in the game; retain across match/reset history.
+local blockedWords = {["งงงวย"]=true, ["งงวย"]=true}
 local function selectWord(prefix, used, minimum)
     if prefix == "" then return nil end
     for _, word in ipairs(buckets[prefix:sub(1, 3)] or {}) do
-        if not used[word] and #word > #prefix and word:sub(1, #prefix) == prefix
+        if not blockedWords[word] and not used[word] and #word > #prefix and word:sub(1, #prefix) == prefix
             and letterLength(word) >= (minimum or 1) then
             return word
         end
