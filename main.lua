@@ -60975,8 +60975,7 @@ local env = type(getgenv) == "function" and getgenv() or _G
 if type(env.TWC_AutoCleanup) == "function" then pcall(env.TWC_AutoCleanup) end
 local alive, enabled, suffixOnly = true, true, true
 local minimumOverride, autoRank = 0, false
-local typingSpeeds={0,0.05,0.10,0.20,0.35}
-local typingSpeedIndex=3
+local typingDuration=0.35
 local ADAPTER = {historyPaths={}, rejectionPaths={"GameUI/Root/Match/Feedback"}, rankOpen="RankedButton/Frame/TextButton", rankSolo="ดวลเดี่ยว 1v1"}
 local rankQueued=false
 local pending, feedbackSeen, matchSeen, outsideSince = nil, {}, false, nil
@@ -60989,34 +60988,41 @@ gui.ResetOnSpawn = false
 gui.DisplayOrder = 10001
 gui.Parent = pg
 local palette = {
-    bg=Color3.fromRGB(19,24,33), card=Color3.fromRGB(32,40,53),
-    ink=Color3.fromRGB(239,244,250), muted=Color3.fromRGB(155,169,190),
-    on=Color3.fromRGB(33,158,120), off=Color3.fromRGB(83,94,113),
+    bg=Color3.fromRGB(255,237,184), card=Color3.fromRGB(168,213,65),
+    ink=Color3.fromRGB(100,55,29), muted=Color3.fromRGB(124,75,40),
+    on=Color3.fromRGB(159,211,49), off=Color3.fromRGB(246,118,116),
 }
 local function round(object, radius)
     local r=Instance.new("UICorner") r.CornerRadius=UDim.new(0,radius or 10) r.Parent=object
 end
 local panel=Instance.new("Frame")
-panel.Size=UDim2.fromOffset(284,326)
+panel.Size=UDim2.fromOffset(284,394)
 panel.Position=UDim2.fromOffset(12,58)
 panel.BackgroundColor3=palette.bg
 panel.BorderSizePixel=0 panel.Parent=gui round(panel,14)
+local outline=Instance.new("UIStroke") outline.Color=Color3.fromRGB(199,134,51) outline.Thickness=4 outline.Parent=panel
+local ribbon=Instance.new("Frame") ribbon.Position=UDim2.fromOffset(4,4) ribbon.Size=UDim2.fromOffset(276,38)
+ribbon.BackgroundColor3=Color3.fromRGB(232,82,161) ribbon.BorderSizePixel=0 ribbon.Parent=panel round(ribbon,12)
 local title=Instance.new("TextLabel")
 title.Position=UDim2.fromOffset(14,8) title.Size=UDim2.fromOffset(176,30)
-title.BackgroundTransparency=1 title.TextColor3=palette.ink title.TextSize=16
-title.TextXAlignment=Enum.TextXAlignment.Left title.Text="ห่วงคำ  /  v2" title.Parent=panel
+title.BackgroundTransparency=1 title.TextColor3=Color3.fromRGB(255,244,165) title.TextSize=16
+title.TextXAlignment=Enum.TextXAlignment.Left title.Text="SomtingHub" title.Parent=panel
 local function button(text,x,y,w,h)
     local b=Instance.new("TextButton")
     b.Text=text b.Position=UDim2.fromOffset(x,y) b.Size=UDim2.fromOffset(w,h)
     b.BackgroundColor3=palette.card b.BorderSizePixel=0 b.TextColor3=palette.ink
-    b.TextSize=13 b.Parent=panel round(b,8) return b
+    b.TextSize=13 b.Parent=panel round(b,12)
+    local edge=Instance.new("UIStroke") edge.Color=Color3.fromRGB(184,134,62) edge.Thickness=1 edge.Parent=b
+    return b
 end
 local minimize=button("—",216,10,26,26)
 local close=button("×",246,10,26,26)
 local body=Instance.new("Frame")
-body.Position=UDim2.fromOffset(0,46) body.Size=UDim2.fromOffset(284,280)
+body.Position=UDim2.fromOffset(0,46) body.Size=UDim2.fromOffset(284,348)
 body.BackgroundTransparency=1 body.Parent=panel
 local function row(label,y)
+    local card=Instance.new("Frame") card.Position=UDim2.fromOffset(8,y) card.Size=UDim2.fromOffset(268,36)
+    card.BackgroundColor3=Color3.fromRGB(250,223,153) card.BorderSizePixel=0 card.Parent=body round(card,12)
     local t=Instance.new("TextLabel") t.Text=label t.BackgroundTransparency=1
     t.TextColor3=palette.muted t.TextSize=14 t.TextXAlignment=Enum.TextXAlignment.Left
     t.Position=UDim2.fromOffset(14,y) t.Size=UDim2.fromOffset(150,32) t.Parent=body
@@ -61024,21 +61030,37 @@ end
 row("ตอบคำอัตโนมัติ",0)
 row("เข้าแรงค์ 1v1 อัตโนมัติ",40)
 row("ความยาวขั้นต่ำ",80)
-row("จังหวะพิมพ์ • วินาที/ตัว",120)
+row("เวลาพิมพ์ทั้งคำ (วิ)",120)
 local toggle=button("ON  ●",180,0,90,32) toggle.Parent=body toggle.BackgroundColor3=palette.on
 local ranked=button("OFF  ○",180,40,90,32) ranked.Parent=body
 local minButton=button("AUTO",180,80,90,32) minButton.Parent=body
-local speedButton=button("0.10 s",180,120,90,32) speedButton.Parent=body
-speedButton.Activated:Connect(function()
-    typingSpeedIndex=typingSpeedIndex % #typingSpeeds+1
-    local delay=typingSpeeds[typingSpeedIndex]
-    speedButton.Text=delay==0 and "ทันที" or string.format("%.2f s",delay)
-end)
-local nextWord=button("คำถัดไป",14,164,120,30) nextWord.Parent=body
-local mode=button("ส่วนต่อท้าย",148,164,122,30) mode.Parent=body
-local reset=button("ล้างประวัติแมตช์",14,200,256,28) reset.Parent=body
+local durationBox=Instance.new("TextBox") durationBox.Name="TypingSeconds"
+durationBox.Position=UDim2.fromOffset(180,120) durationBox.Size=UDim2.fromOffset(90,32)
+durationBox.BackgroundColor3=Color3.fromRGB(255,251,226) durationBox.TextColor3=palette.ink
+durationBox.TextSize=16 durationBox.Text="0.35" durationBox.ClearTextOnFocus=false
+durationBox.PlaceholderText="0–10 วิ" durationBox.BorderSizePixel=0 durationBox.Parent=body round(durationBox,10)
+local function setDuration(value)
+    if not value or value~=value or value==math.huge or value==-math.huge then
+        durationBox.Text=tostring(typingDuration) return
+    end
+    typingDuration=math.max(0,math.min(value,10))
+    durationBox.Text=tostring(typingDuration)
+end
+durationBox.FocusLost:Connect(function() setDuration(tonumber(durationBox.Text)) end)
+for i,value in ipairs({0,0.05,0.10,0.35,0.50,1,2,3}) do
+    local label=value==0 and "ทันที" or tostring(value).." วิ"
+    local preset=button(label,14+((i-1)%4)*65,160+math.floor((i-1)/4)*32,61,27)
+    preset.Parent=body preset.BackgroundColor3=Color3.fromRGB(255,202,76)
+    preset.Activated:Connect(function() setDuration(value) end)
+end
+ranked.BackgroundColor3=palette.off
+minButton.BackgroundColor3=Color3.fromRGB(255,202,76)
+close.BackgroundColor3=Color3.fromRGB(255,168,53)
+local nextWord=button("คำถัดไป",14,230,120,30) nextWord.Parent=body
+local mode=button("ส่วนต่อท้าย",148,230,122,30) mode.Parent=body
+local reset=button("ล้างประวัติแมตช์",14,266,256,28) reset.Parent=body
 local status=Instance.new("TextLabel")
-status.Position=UDim2.fromOffset(14,234) status.Size=UDim2.fromOffset(256,38)
+status.Position=UDim2.fromOffset(14,300) status.Size=UDim2.fromOffset(256,38)
 status.BackgroundTransparency=1 status.TextColor3=palette.muted status.TextSize=12
 status.TextWrapped=true status.TextXAlignment=Enum.TextXAlignment.Left
 status.TextYAlignment=Enum.TextYAlignment.Top status.Text="กำลังเตรียมระบบ…" status.Parent=body
@@ -61080,9 +61102,9 @@ reset.Activated:Connect(function() used={} say("ล้างประวัต�
 local minimized=false
 minimize.Activated:Connect(function()
     minimized=not minimized body.Visible=not minimized
-    panel.Size=UDim2.fromOffset(284,minimized and 46 or 326)
+    panel.Size=UDim2.fromOffset(284,minimized and 46 or 394)
     minimize.Text=minimized and "+" or "—"
-    title.Text=minimized and (enabled and "ห่วงคำ  •  ON" or "ห่วงคำ  •  OFF") or "ห่วงคำ  /  v2"
+    title.Text=minimized and (enabled and "SomtingHub • ON" or "SomtingHub • OFF") or "SomtingHub"
 end)
 local UIS=game:GetService("UserInputService")
 local dragStart,dragPosition
@@ -61304,11 +61326,15 @@ task.spawn(function()
             end
             s.box.Text=""
             local typed=""
+            local duration=typingDuration
+            local typingStarted=os.clock()
+            local pieceIndex=0
             for _,piece in ipairs(pieces) do
                 if not typingValid() or s.box.Text~=typed then return end
                 typed=typed..piece
                 s.box.Text=typed
-                local delay=typingSpeeds[typingSpeedIndex]
+                pieceIndex=pieceIndex+1
+                local delay=math.max(0,typingStarted+duration*pieceIndex/#pieces-os.clock())
                 while delay>0 do
                     local interval=math.min(delay,0.05)
                     task.wait(interval)
