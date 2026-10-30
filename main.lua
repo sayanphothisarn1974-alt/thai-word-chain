@@ -60975,6 +60975,8 @@ local env = type(getgenv) == "function" and getgenv() or _G
 if type(env.TWC_AutoCleanup) == "function" then pcall(env.TWC_AutoCleanup) end
 local alive, enabled, suffixOnly = true, true, true
 local minimumOverride, autoRank = 0, false
+local typingSpeeds={0,0.05,0.10,0.20,0.35}
+local typingSpeedIndex=3
 local ADAPTER = {historyPaths={}, rejectionPaths={"GameUI/Root/Match/Feedback"}, rankOpen="RankedButton/Frame/TextButton", rankSolo="ดวลเดี่ยว 1v1"}
 local rankQueued=false
 local pending, feedbackSeen, matchSeen, outsideSince = nil, {}, false, nil
@@ -60995,7 +60997,7 @@ local function round(object, radius)
     local r=Instance.new("UICorner") r.CornerRadius=UDim.new(0,radius or 10) r.Parent=object
 end
 local panel=Instance.new("Frame")
-panel.Size=UDim2.fromOffset(284,286)
+panel.Size=UDim2.fromOffset(284,326)
 panel.Position=UDim2.fromOffset(12,58)
 panel.BackgroundColor3=palette.bg
 panel.BorderSizePixel=0 panel.Parent=gui round(panel,14)
@@ -61012,7 +61014,7 @@ end
 local minimize=button("—",216,10,26,26)
 local close=button("×",246,10,26,26)
 local body=Instance.new("Frame")
-body.Position=UDim2.fromOffset(0,46) body.Size=UDim2.fromOffset(284,240)
+body.Position=UDim2.fromOffset(0,46) body.Size=UDim2.fromOffset(284,280)
 body.BackgroundTransparency=1 body.Parent=panel
 local function row(label,y)
     local t=Instance.new("TextLabel") t.Text=label t.BackgroundTransparency=1
@@ -61022,14 +61024,21 @@ end
 row("ตอบคำอัตโนมัติ",0)
 row("เข้าแรงค์ 1v1 อัตโนมัติ",40)
 row("ความยาวขั้นต่ำ",80)
+row("จังหวะพิมพ์ • วินาที/ตัว",120)
 local toggle=button("ON  ●",180,0,90,32) toggle.Parent=body toggle.BackgroundColor3=palette.on
 local ranked=button("OFF  ○",180,40,90,32) ranked.Parent=body
 local minButton=button("AUTO",180,80,90,32) minButton.Parent=body
-local nextWord=button("คำถัดไป",14,124,120,30) nextWord.Parent=body
-local mode=button("ส่วนต่อท้าย",148,124,122,30) mode.Parent=body
-local reset=button("ล้างประวัติแมตช์",14,160,256,28) reset.Parent=body
+local speedButton=button("0.10 s",180,120,90,32) speedButton.Parent=body
+speedButton.Activated:Connect(function()
+    typingSpeedIndex=typingSpeedIndex % #typingSpeeds+1
+    local delay=typingSpeeds[typingSpeedIndex]
+    speedButton.Text=delay==0 and "ทันที" or string.format("%.2f s",delay)
+end)
+local nextWord=button("คำถัดไป",14,164,120,30) nextWord.Parent=body
+local mode=button("ส่วนต่อท้าย",148,164,122,30) mode.Parent=body
+local reset=button("ล้างประวัติแมตช์",14,200,256,28) reset.Parent=body
 local status=Instance.new("TextLabel")
-status.Position=UDim2.fromOffset(14,194) status.Size=UDim2.fromOffset(256,38)
+status.Position=UDim2.fromOffset(14,234) status.Size=UDim2.fromOffset(256,38)
 status.BackgroundTransparency=1 status.TextColor3=palette.muted status.TextSize=12
 status.TextWrapped=true status.TextXAlignment=Enum.TextXAlignment.Left
 status.TextYAlignment=Enum.TextYAlignment.Top status.Text="กำลังเตรียมระบบ…" status.Parent=body
@@ -61071,7 +61080,7 @@ reset.Activated:Connect(function() used={} say("ล้างประวัต�
 local minimized=false
 minimize.Activated:Connect(function()
     minimized=not minimized body.Visible=not minimized
-    panel.Size=UDim2.fromOffset(284,minimized and 46 or 286)
+    panel.Size=UDim2.fromOffset(284,minimized and 46 or 326)
     minimize.Text=minimized and "+" or "—"
     title.Text=minimized and (enabled and "ห่วงคำ  •  ON" or "ห่วงคำ  •  OFF") or "ห่วงคำ  /  v2"
 end)
@@ -61114,7 +61123,7 @@ local function shown(obj)
     end
     return obj == pg
 end
-local function state()
+local function state(expected)
     local match = at("GameUI/Root/Match")
     local prompt = at("GameUI/Root/Match/PromptBox/Prompt")
     local prefix = at("GameUI/Root/Match/InputBar/PrefixLabel")
@@ -61143,7 +61152,8 @@ local function state()
         local joined=table.concat(fragments)
         -- Tiles may include the answer currently being typed, not just the prompt.
         local entered=clean(box.Text)
-        if entered~="" and #joined>#entered and joined:sub(-#entered)==entered then
+        if entered~="" and #joined>#entered and joined:sub(-#entered)==entered
+            and (not expected or #joined-#entered>=#expected.prefix) then
             joined=joined:sub(1,#joined-#entered)
         end
         if joined~="" then
@@ -61275,10 +61285,40 @@ task.spawn(function()
             end
             local token = revision
             local payload = inputText(word, s.fixedPrefix, suffixOnly)
-            s.box.Text = payload
+            local function typingValid()
+                if not alive or not enabled or token~=revision then return false end
+                local current=state(s)
+                return current and current.active and current.prefix==s.prefix
+                    and current.fixedPrefix==s.fixedPrefix and current.box==s.box
+                    and current.send==s.send and current.minimum==s.minimum
+                    and (not current.timer or current.timer>0.3)
+            end
+            -- Append complete UTF-8 letters with Thai combining marks together.
+            local pieces={}
+            for _,cp in utf8.codes(payload) do
+                local char=utf8.char(cp)
+                local combining=cp==0x0E31 or (cp>=0x0E34 and cp<=0x0E3A)
+                    or (cp>=0x0E47 and cp<=0x0E4E)
+                if combining and #pieces>0 then pieces[#pieces]=pieces[#pieces]..char
+                else pieces[#pieces+1]=char end
+            end
+            s.box.Text=""
+            local typed=""
+            for _,piece in ipairs(pieces) do
+                if not typingValid() or s.box.Text~=typed then return end
+                typed=typed..piece
+                s.box.Text=typed
+                local delay=typingSpeeds[typingSpeedIndex]
+                while delay>0 do
+                    local interval=math.min(delay,0.05)
+                    task.wait(interval)
+                    delay=delay-interval
+                    if not typingValid() then return end
+                end
+            end
             task.wait(0.15)
             if not alive or not enabled or token ~= revision then return end
-            local now = state()
+            local now = state(s)
             if not now or not now.active or now.prefix ~= s.prefix or now.fixedPrefix~=s.fixedPrefix
                 or now.minimum~=s.minimum or now.box ~= s.box
                 or now.send ~= s.send then return end
