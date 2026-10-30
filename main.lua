@@ -1,5 +1,5 @@
--- Thai Word Chain auto answer v1.1 — expanded Thai vocabulary.
--- Paste the WHOLE file into Delta. No HTTP loader, remote guessing, or purchases.
+-- Thai Word Chain v2: feedback retries, compact UI, optional solo ranked queue.
+-- Opponent history is unavailable; duplicate words are excluded after rejection.
 -- Includes filtered PyThaiNLP words_th.txt (CC0-1.0), plus curated words.
 -- Source: https://github.com/PyThaiNLP/pythainlp/blob/main/pythainlp/corpus/words_th.txt
 -- This is not the game's private dictionary; some words may be rejected.
@@ -60934,10 +60934,25 @@ for word in WORDS_TEXT:gmatch("[^\r\n]+") do
         table.insert(buckets[key], word)
     end
 end
-local function selectWord(prefix, used)
+local function letterLength(word)
+    local n = 0
+    for _, cp in utf8.codes(word) do
+        -- Count visible base letters conservatively; combining marks add no length.
+        if cp ~= 0x0E31 and not (cp >= 0x0E34 and cp <= 0x0E3A)
+            and not (cp >= 0x0E47 and cp <= 0x0E4E) then n = n + 1 end
+    end
+    return n
+end
+local function detectMinimum(text)
+    text = tostring(text or ""):gsub("<[^>]*>", "")
+    local n = tonumber(text:match("ยาว%s*(%d+)%s*ตัว"))
+    return n and math.max(1, math.min(n, 32)) or 1
+end
+local function selectWord(prefix, used, minimum)
     if prefix == "" then return nil end
     for _, word in ipairs(buckets[prefix:sub(1, 3)] or {}) do
-        if not used[word] and #word > #prefix and word:sub(1, #prefix) == prefix then
+        if not used[word] and #word > #prefix and word:sub(1, #prefix) == prefix
+            and letterLength(word) >= (minimum or 1) then
             return word
         end
     end
@@ -60957,6 +60972,10 @@ assert(pg, "PlayerGui unavailable")
 local env = type(getgenv) == "function" and getgenv() or _G
 if type(env.TWC_AutoCleanup) == "function" then pcall(env.TWC_AutoCleanup) end
 local alive, enabled, suffixOnly = true, true, true
+local minimumOverride, autoRank = 0, false
+local ADAPTER = {historyPaths={}, rejectionPaths={"GameUI/Root/Match/Feedback"}, rankOpen="RankedButton/Frame/TextButton", rankSolo="ดวลเดี่ยว 1v1"}
+local rankQueued=false
+local pending, feedbackSeen, matchSeen, outsideSince = nil, {}, false, nil
 local used, lastAttempt, priorPrefix = {}, nil, nil
 local priorActive, priorTimer, lastTime = false, nil, 0
 local revision, retryRequested = 0, false
@@ -60965,86 +60984,116 @@ gui.Name = "TWC_AutoAnswer_v1"
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 10001
 gui.Parent = pg
-local panel = Instance.new("Frame")
-panel.Size = UDim2.fromOffset(272, 168)
-panel.Position = UDim2.fromOffset(8, 55)
-panel.BackgroundColor3 = Color3.fromRGB(20, 25, 36)
-panel.Parent = gui
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 10)
-corner.Parent = panel
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -64, 0, 28)
-title.BackgroundTransparency = 1
-title.TextColor3 = Color3.new(1, 1, 1)
-title.TextSize = 15
-title.Text = "ห่วงคำ • AUTO"
-title.Parent = panel
-local function button(text, x, y, w, h)
-    local b = Instance.new("TextButton")
-    b.Position = UDim2.fromOffset(x, y)
-    b.Size = UDim2.fromOffset(w, h)
-    b.BackgroundColor3 = Color3.fromRGB(42, 73, 102)
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.TextSize = 13
-    b.Text = text
-    b.Parent = panel
-    return b
+local palette = {
+    bg=Color3.fromRGB(19,24,33), card=Color3.fromRGB(32,40,53),
+    ink=Color3.fromRGB(239,244,250), muted=Color3.fromRGB(155,169,190),
+    on=Color3.fromRGB(33,158,120), off=Color3.fromRGB(83,94,113),
+}
+local function round(object, radius)
+    local r=Instance.new("UICorner") r.CornerRadius=UDim.new(0,radius or 10) r.Parent=object
 end
-local minimize = button("–", 210, 2, 28, 24)
-local close = button("×", 242, 2, 28, 24)
-local toggle = button("เปิดอยู่ • กดหยุด", 8, 32, 125, 30)
-local mode = button("พิมพ์ส่วนต่อท้าย", 139, 32, 125, 30)
-local nextWord = button("ลองคำถัดไป", 8, 68, 125, 28)
-local reset = button("เริ่มแมตช์ใหม่", 139, 68, 125, 28)
-local status = Instance.new("TextLabel")
-status.Position = UDim2.fromOffset(8, 102)
-status.Size = UDim2.fromOffset(256, 58)
-status.BackgroundTransparency = 1
-status.TextColor3 = Color3.fromRGB(190, 233, 208)
-status.TextSize = 13
-status.TextWrapped = true
-status.TextXAlignment = Enum.TextXAlignment.Left
-status.TextYAlignment = Enum.TextYAlignment.Top
-status.Text = "กำลังรอโจทย์..."
-status.Parent = panel
-local function say(text) if alive and gui.Parent then status.Text = text end end
+local panel=Instance.new("Frame")
+panel.Size=UDim2.fromOffset(284,286)
+panel.Position=UDim2.fromOffset(12,58)
+panel.BackgroundColor3=palette.bg
+panel.BorderSizePixel=0 panel.Parent=gui round(panel,14)
+local title=Instance.new("TextLabel")
+title.Position=UDim2.fromOffset(14,8) title.Size=UDim2.fromOffset(176,30)
+title.BackgroundTransparency=1 title.TextColor3=palette.ink title.TextSize=16
+title.TextXAlignment=Enum.TextXAlignment.Left title.Text="ห่วงคำ  /  v2" title.Parent=panel
+local function button(text,x,y,w,h)
+    local b=Instance.new("TextButton")
+    b.Text=text b.Position=UDim2.fromOffset(x,y) b.Size=UDim2.fromOffset(w,h)
+    b.BackgroundColor3=palette.card b.BorderSizePixel=0 b.TextColor3=palette.ink
+    b.TextSize=13 b.Parent=panel round(b,8) return b
+end
+local minimize=button("—",216,10,26,26)
+local close=button("×",246,10,26,26)
+local body=Instance.new("Frame")
+body.Position=UDim2.fromOffset(0,46) body.Size=UDim2.fromOffset(284,240)
+body.BackgroundTransparency=1 body.Parent=panel
+local function row(label,y)
+    local t=Instance.new("TextLabel") t.Text=label t.BackgroundTransparency=1
+    t.TextColor3=palette.muted t.TextSize=14 t.TextXAlignment=Enum.TextXAlignment.Left
+    t.Position=UDim2.fromOffset(14,y) t.Size=UDim2.fromOffset(150,32) t.Parent=body
+end
+row("ตอบคำอัตโนมัติ",0)
+row("เข้าแรงค์ 1v1 อัตโนมัติ",40)
+row("ความยาวขั้นต่ำ",80)
+local toggle=button("ON  ●",180,0,90,32) toggle.Parent=body toggle.BackgroundColor3=palette.on
+local ranked=button("OFF  ○",180,40,90,32) ranked.Parent=body
+local minButton=button("AUTO",180,80,90,32) minButton.Parent=body
+local nextWord=button("คำถัดไป",14,124,120,30) nextWord.Parent=body
+local mode=button("ส่วนต่อท้าย",148,124,122,30) mode.Parent=body
+local reset=button("ล้างประวัติแมตช์",14,160,256,28) reset.Parent=body
+local status=Instance.new("TextLabel")
+status.Position=UDim2.fromOffset(14,194) status.Size=UDim2.fromOffset(256,38)
+status.BackgroundTransparency=1 status.TextColor3=palette.muted status.TextSize=12
+status.TextWrapped=true status.TextXAlignment=Enum.TextXAlignment.Left
+status.TextYAlignment=Enum.TextYAlignment.Top status.Text="กำลังเตรียมระบบ…" status.Parent=body
+local function say(text) if alive and gui.Parent then status.Text=text end end
+local connections={}
 local function cleanup()
-    alive = false
-    enabled = false
-    revision = revision + 1
+    alive=false enabled=false autoRank=false revision=revision+1
+    for _,c in ipairs(connections) do c:Disconnect() end
     gui:Destroy()
 end
-env.TWC_AutoCleanup = cleanup
+env.TWC_AutoCleanup=cleanup
 close.Activated:Connect(cleanup)
 toggle.Activated:Connect(function()
-    enabled = not enabled
-    revision = revision + 1
-    toggle.Text = enabled and "เปิดอยู่ • กดหยุด" or "หยุดอยู่ • กดเริ่ม"
-    say(enabled and "รอโจทย์ใหม่ หรือกดลองคำถัดไป" or "หยุดแล้ว")
+    enabled=not enabled revision=revision+1
+    toggle.Text=enabled and "ON  ●" or "OFF  ○"
+    toggle.BackgroundColor3=enabled and palette.on or palette.off
+    if not enabled then autoRank=false ranked.Text="OFF  ○" ranked.BackgroundColor3=palette.off end
+    say(enabled and "รอตาคุณ" or "หยุดตอบและหยุดเข้าแรงค์แล้ว")
+end)
+ranked.Activated:Connect(function()
+    if not ADAPTER.rankOpen or not ADAPTER.rankSolo then say("กำลังรอข้อมูลปุ่มแรงค์จากเกม") return end
+    autoRank=not autoRank
+    rankQueued=false
+    ranked.Text=autoRank and "ON  ●" or "OFF  ○"
+    ranked.BackgroundColor3=autoRank and palette.on or palette.off
+    if autoRank and not enabled then autoRank=false ranked.Text="OFF  ○" say("เปิดตอบอัตโนมัติก่อน") end
+end)
+minButton.Activated:Connect(function()
+    minimumOverride=minimumOverride==0 and 3 or (minimumOverride==3 and 5 or 0)
+    minButton.Text=minimumOverride==0 and "AUTO" or tostring(minimumOverride).." ตัว"
+    revision=revision+1
 end)
 mode.Activated:Connect(function()
-    suffixOnly = not suffixOnly
-    revision = revision + 1
-    mode.Text = suffixOnly and "พิมพ์ส่วนต่อท้าย" or "พิมพ์คำเต็ม"
-    say("เปลี่ยนวิธีพิมพ์แล้ว กดลองคำถัดไปเพื่อทดสอบ")
+    suffixOnly=not suffixOnly revision=revision+1
+    mode.Text=suffixOnly and "ส่วนต่อท้าย" or "คำเต็ม"
 end)
-nextWord.Activated:Connect(function()
-    if not enabled then say("กดเริ่มก่อนครับ"); return end
-    retryRequested = true
-end)
-reset.Activated:Connect(function()
-    used = {}
-    -- Deliberately retain the current turn lock to avoid sending twice mid-turn.
-    say("ล้างคำที่ใช้แล้ว รอโจทย์ถัดไป")
-end)
-local minimized = false
+nextWord.Activated:Connect(function() if enabled then retryRequested=true end end)
+reset.Activated:Connect(function() used={} say("ล้างประวัติแล้ว") end)
+local minimized=false
 minimize.Activated:Connect(function()
-    minimized = not minimized
-    for _, item in ipairs({toggle, mode, nextWord, reset, status}) do item.Visible = not minimized end
-    panel.Size = UDim2.fromOffset(272, minimized and 28 or 168)
-    minimize.Text = minimized and "+" or "–"
+    minimized=not minimized body.Visible=not minimized
+    panel.Size=UDim2.fromOffset(284,minimized and 46 or 286)
+    minimize.Text=minimized and "+" or "—"
+    title.Text=minimized and (enabled and "ห่วงคำ  •  ON" or "ห่วงคำ  •  OFF") or "ห่วงคำ  /  v2"
 end)
+local UIS=game:GetService("UserInputService")
+local dragStart,dragPosition
+title.Active=true
+table.insert(connections,title.InputBegan:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        dragStart=input.Position dragPosition=panel.Position
+    end
+end))
+table.insert(connections,UIS.InputEnded:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragStart=nil end
+end))
+table.insert(connections,UIS.InputChanged:Connect(function(input)
+    if dragStart and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+        local delta=input.Position-dragStart
+        local camera=workspace.CurrentCamera
+        local size=camera and camera.ViewportSize
+        local x,y=dragPosition.X.Offset+delta.X,dragPosition.Y.Offset+delta.Y
+        if size then x=math.max(0,math.min(x,size.X-284)) y=math.max(0,math.min(y,size.Y-panel.AbsoluteSize.Y)) end
+        panel.Position=UDim2.fromOffset(x,y)
+    end
+end))
 
 local function at(path)
     local obj = pg
@@ -61075,8 +61124,37 @@ local function state()
     local active = shown(match) and shown(box) and shown(send) and send.Active
         and tostring(prompt.Text):find("ตาคุณ", 1, true) ~= nil
         and tostring(send.Text):upper():find("SEND", 1, true) ~= nil
-    return {active = active, prefix = clean(prefix.Text), box = box, send = send,
-        timer = timer and tonumber(timer.Text) or nil}
+    local fixed = clean(prefix.Text)
+    local required = fixed
+    local tiles=match:FindFirstChild("Tiles")
+    if tiles then
+        local labels={}
+        for _,o in ipairs(tiles:GetDescendants()) do
+            if o:IsA("TextLabel") and shown(o) and clean(o.Text)~="" then table.insert(labels,o) end
+        end
+        table.sort(labels,function(a,b)
+            if a.AbsolutePosition.X~=b.AbsolutePosition.X then return a.AbsolutePosition.X<b.AbsolutePosition.X end
+            return a.LayoutOrder<b.LayoutOrder
+        end)
+        local fragments={}
+        for _,o in ipairs(labels) do fragments[#fragments+1]=clean(o.Text) end
+        local joined=table.concat(fragments)
+        -- Tiles may include the answer currently being typed, not just the prompt.
+        local entered=clean(box.Text)
+        if entered~="" and #joined>#entered and joined:sub(-#entered)==entered then
+            joined=joined:sub(1,#joined-#entered)
+        end
+        if joined~="" then
+            if joined:sub(1,#fixed)==fixed then required=joined
+            else active=false end -- wait for tile/prefix animations to agree
+        end
+    end
+    local minimum=math.max(minimumOverride,detectMinimum(prompt.Text))
+    for _,o in ipairs(match:GetDescendants()) do
+        if o:IsA("TextLabel") and shown(o) then minimum=math.max(minimum,detectMinimum(o.Text)) end
+    end
+    return {active = active, prefix = required, fixedPrefix=fixed, minimum=minimum,
+        box = box, send = send, timer = timer and tonumber(timer.Text) or nil}
 end
 local function sendSignal(buttonObject)
     -- Select only one wired event. Never fire multiple events for one answer.
@@ -61093,21 +61171,85 @@ local function sendSignal(buttonObject)
     return nil
 end
 
+local function monitorFeedback()
+    for _,path in ipairs(ADAPTER.historyPaths) do
+        local root=at(path)
+        if root then
+            local list=root:GetDescendants() table.insert(list,root)
+            for _,o in ipairs(list) do
+                if o:IsA("TextLabel") and shown(o) then
+                    local word=clean(o.Text)
+                    if seen[word] then used[word]=true end
+                end
+            end
+        end
+    end
+    for _,path in ipairs(ADAPTER.rejectionPaths) do
+        local o=at(path)
+        local text=o and shown(o) and tostring(o.Text) or ""
+        if text~=feedbackSeen[path] then
+            feedbackSeen[path]=text
+            if pending and text~="" and os.clock()-pending.time<4 then
+                local duplicate=text:find("ซ้ำ",1,true) or text:find("ใช้ไปแล้ว",1,true)
+                local invalid=text:find("ไม่พบคำ",1,true) or text:find("ไม่มีคำ",1,true)
+                if duplicate or invalid then
+                    used[pending.word]=true
+                    retryRequested=true
+                    say(duplicate and "คำนี้ถูกใช้แล้ว • เปลี่ยนคำ" or "เกมไม่รับคำ • เปลี่ยนคำ")
+                    pending=nil
+                end
+            end
+        end
+    end
+end
+local rankLast=0
+local function rankedStep()
+    if not (autoRank and enabled) or os.clock()-rankLast<8 then return end
+    if shown(at("GameUI/Root/Match")) then rankQueued=false return end
+    if rankQueued or shown(at("SeatControls/LeaveButton")) then return end
+    local modal=at("RankedModal")
+    local buttonObject
+    if shown(modal) then
+        for _,label in ipairs(modal:GetDescendants()) do
+            if label:IsA("TextLabel") and shown(label) and label.Text==ADAPTER.rankSolo then
+                local candidate=label.Parent
+                while candidate and candidate~=modal and not candidate:IsA("GuiButton") do candidate=candidate.Parent end
+                if candidate and candidate:IsA("GuiButton") then buttonObject=candidate break end
+            end
+        end
+    else buttonObject=at(ADAPTER.rankOpen) end
+    if buttonObject and shown(buttonObject) and buttonObject.Active then
+        local signal,name=sendSignal(buttonObject)
+        if signal then
+            rankLast=os.clock()
+            if shown(modal) then rankQueued=true end
+            if name=="Activated" then firesignal(signal,nil,1) else firesignal(signal) end
+            say(rankQueued and "รอเข้าแรงค์ 1v1 • ไม่กดซ้ำ" or "เปิดเมนูแรงค์")
+        end
+    end
+end
+
 task.spawn(function()
     task.wait(1)
     while alive and gui.Parent do
         local ok, err = pcall(function()
+            local inMatch=shown(at("GameUI/Root/Match"))
+            if inMatch then
+                if outsideSince and os.clock()-outsideSince>2 then used={} pending=nil feedbackSeen={} end
+                matchSeen=true outsideSince=nil
+            elseif matchSeen and not outsideSince then outsideSince=os.clock() end
+            monitorFeedback()
+            rankedStep()
             local s = state()
             if not s or not s.active then
                 priorActive, priorPrefix, priorTimer = false, nil, nil
                 lastAttempt = nil
                 retryRequested = false
-                if enabled then say("รอตาคุณ • คลังคำ " .. #words .. " คำ") end
+                if enabled and not autoRank then say("รอตาคุณ • คลังคำ " .. #words .. " คำ") end
                 return
             end
-            local timerRestart = priorTimer and s.timer and s.timer > priorTimer + 2
-                and os.clock() - lastTime > 1
-            if not priorActive or s.prefix ~= priorPrefix or timerRestart then lastAttempt = nil end
+            -- A time-extension bonus is not a new turn.
+            if not priorActive or s.prefix ~= priorPrefix then lastAttempt = nil end
             priorActive, priorPrefix, priorTimer = true, s.prefix, s.timer
             if not enabled or s.prefix == "" then return end
             if s.timer and s.timer <= 0.5 then return end
@@ -61116,7 +61258,7 @@ task.spawn(function()
             end
             if lastAttempt == s.prefix then return end
             if os.clock() - lastTime < 0.8 then return end
-            local word = selectWord(s.prefix, used)
+            local word = selectWord(s.prefix, used, s.minimum)
             if not word then
                 lastAttempt = s.prefix
                 say("ไม่มีคำขึ้นต้นด้วย “" .. s.prefix .. "” ในคลัง\nเพิ่มคำใน WORDS_TEXT ได้")
@@ -61125,17 +61267,18 @@ task.spawn(function()
             local signal, signalName = sendSignal(s.send)
             if not signal then
                 enabled = false
-                toggle.Text = "หยุดอยู่ • กดเริ่ม"
+                toggle.Text = "OFF  ○"
                 say("ไม่พบ event ของ SEND — ส่งข้อความนี้กลับมาให้ตรวจ")
                 return
             end
             local token = revision
-            local payload = inputText(word, s.prefix, suffixOnly)
+            local payload = inputText(word, s.fixedPrefix, suffixOnly)
             s.box.Text = payload
             task.wait(0.15)
             if not alive or not enabled or token ~= revision then return end
             local now = state()
-            if not now or not now.active or now.prefix ~= s.prefix or now.box ~= s.box
+            if not now or not now.active or now.prefix ~= s.prefix or now.fixedPrefix~=s.fixedPrefix
+                or now.minimum~=s.minimum or now.box ~= s.box
                 or now.send ~= s.send then return end
             if now.timer and now.timer <= 0.2 then return end
             if now.box.Text ~= payload then
@@ -61145,12 +61288,13 @@ task.spawn(function()
             end
             lastAttempt, lastTime = s.prefix, os.clock()
             used[word] = true
+            pending={word=word,prefix=s.prefix,time=lastTime}
             if signalName == "Activated" then firesignal(signal, nil, 1) else firesignal(signal) end
             say(s.prefix .. " → " .. word .. "\nส่งแล้ว; ถ้าเกมไม่รับ กดลองคำถัดไป")
         end)
         if not ok and alive then
             enabled = false
-            toggle.Text = "หยุดอยู่ • กดเริ่ม"
+            toggle.Text = "OFF  ○"
             say("ERROR: " .. tostring(err):sub(1, 200))
             warn("TWC auto answer: " .. tostring(err))
         end
